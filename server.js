@@ -26,15 +26,13 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// Serve static files (frontend)
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve static files from root directory (для index.html если нужно)
+app.use(express.static(__dirname));
 
 // MongoDB connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://mongo:FeHWcshaCKYTtPAPcdoygkOiJHSLSHSE@hopper.proxy.rlwy.net:38172';
 
 mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
   dbName: 'adearn_db'
 })
 .then(() => console.log('✅ Connected to MongoDB'))
@@ -191,7 +189,6 @@ app.post('/api/auth/register', async (req, res) => {
       }
     }
     
-    // Update last active
     user.lastActive = new Date();
     await user.save();
     
@@ -288,7 +285,7 @@ app.post('/api/ads/watch', authMiddleware, async (req, res) => {
     });
     await transaction.save();
     
-    // Проверка на реферальный бонус (10% от дохода реферала)
+    // Referral bonus
     const referral = await Referral.findOne({ referredId: user._id });
     if (referral) {
       const referrer = await User.findById(referral.referrerId);
@@ -594,11 +591,6 @@ app.post('/api/admin/settings', adminMiddleware, async (req, res) => {
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date() });
-});
-
-// Serve index.html for all other routes (SPA)
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 // Start server
