@@ -5,13 +5,13 @@ const dotenv = require('dotenv');
 const compression = require('compression');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const path = require('path');
+const { Telegraf } = require('telegraf');
 
 dotenv.config();
 
 const app = express();
 
-// Trust proxy - важно для Railway (чтобы правильно определять IP)
+// Trust proxy - важно для Railway
 app.set('trust proxy', 1);
 
 // Middleware
@@ -22,24 +22,93 @@ app.use(helmet({
   contentSecurityPolicy: false,
 }));
 
-// Rate limiting - ИСПРАВЛЕННАЯ ВЕРСИЯ
+// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   trustProxy: true,
-  keyGenerator: (req) => {
-    // Используем реальный IP из заголовков прокси
-    return req.ip || req.connection.remoteAddress;
-  },
-  skip: (req) => {
-    // Пропускаем проверку для health эндпоинта
-    return req.path === '/health';
-  }
+  keyGenerator: (req) => req.ip || req.connection.remoteAddress,
+  skip: (req) => req.path === '/health'
 });
 app.use('/api/', limiter);
 
-// Serve static files from root directory
+// Serve static files
 app.use(express.static(__dirname));
+
+// Токен бота
+const BOT_TOKEN = '8700146488:AAHtv1yUFEsH16svFrgZPNtxpbrLKxluUZ4';
+const bot = new Telegraf(BOT_TOKEN);
+const WEBAPP_URL = 'https://duckadsss.github.io/duck/';
+
+// Команды бота
+bot.start((ctx) => {
+  const userName = ctx.from.first_name;
+  const refCode = ctx.payload;
+  const webAppUrl = refCode ? `${WEBAPP_URL}?ref=${refCode}` : WEBAPP_URL;
+  
+  ctx.replyWithHTML(
+    `👋 Привет, <b>${userName}</b>!\n\n` +
+    `💰 Зарабатывай деньги просмотром рекламы!\n` +
+    `🎁 Покупай NFT для увеличения дохода до +50%\n` +
+    `👥 Приглашай друзей и получай 10% от их дохода\n\n` +
+    `👇 Нажми на кнопку ниже, чтобы начать зарабатывать!`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🚀 Открыть AdEarn Pro', web_app: { url: webAppUrl } }],
+          [{ text: '📢 Наш канал', url: 'https://t.me/your_channel' }],
+          [{ text: '💬 Поддержка', url: 'https://t.me/your_support' }]
+        ]
+      }
+    }
+  );
+});
+
+bot.command('balance', async (ctx) => {
+  const telegramId = String(ctx.from.id);
+  try {
+    const user = await User.findOne({ telegramId });
+    if (user) {
+      ctx.replyWithHTML(
+        `💰 <b>Ваш баланс:</b> ${user.balance.toFixed(6)}$\n` +
+        `📊 <b>Всего заработано:</b> ${user.totalEarned.toFixed(6)}$\n` +
+        `📺 <b>Просмотров:</b> ${user.adsWatched}\n` +
+        `⭐ <b>Уровень:</b> ${getLevelByWatched(user.adsWatched)}\n\n` +
+        `🔗 <a href="${WEBAPP_URL}">Открыть приложение</a>`
+      );
+    } else {
+      ctx.reply('❓ Вы ещё не зарегистрированы! Нажмите кнопку ниже, чтобы начать.', {
+        reply_markup: {
+          inline_keyboard: [[{ text: '🚀 Начать', web_app: { url: WEBAPP_URL } }]]
+        }
+      });
+    }
+  } catch (error) {
+    ctx.reply('❌ Ошибка, попробуйте позже');
+  }
+});
+
+bot.help((ctx) => {
+  ctx.replyWithHTML(
+    `<b>📖 Помощь по AdEarn Pro</b>\n\n` +
+    `• Смотрите рекламу и получайте награду\n` +
+    `• Уровень повышается каждые 500 просмотров\n` +
+    `• Покупайте NFT для увеличения дохода\n` +
+    `• Приглашайте друзей (10% от их дохода)\n` +
+    `• Выводите средства от 1$\n\n` +
+    `⭐ <b>Бонусы от NFT:</b>\n` +
+    `• 1 уровень: +1%\n` +
+    `• 2 уровень: +3%\n` +
+    `• 3 уровень: +10%\n` +
+    `• 4 уровень: +30%\n` +
+    `• 5 уровень: +50%`
+  );
+});
+
+// Запуск бота
+bot.launch().then(() => console.log('🤖 Bot started'));
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 // MongoDB connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://mongo:FeHWcshaCKYTtPAPcdoygkOiJHSLSHSE@hopper.proxy.rlwy.net:38172';
@@ -178,7 +247,6 @@ async function authMiddleware(req, res, next) {
 
 // ==================== API ROUTES ====================
 
-// Auth & User
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { telegramId, firstName, lastName, username, referredBy } = req.body;
@@ -259,7 +327,6 @@ app.get('/api/user/profile', authMiddleware, async (req, res) => {
   }
 });
 
-// Watch Ad
 app.post('/api/ads/watch', authMiddleware, async (req, res) => {
   try {
     const user = req.user;
@@ -333,7 +400,6 @@ app.post('/api/ads/watch', authMiddleware, async (req, res) => {
   }
 });
 
-// NFT routes
 app.get('/api/nft/list', authMiddleware, async (req, res) => {
   try {
     const ownedNFTs = await NFT.find({ userId: req.user._id });
@@ -414,7 +480,6 @@ app.post('/api/nft/unequip', authMiddleware, async (req, res) => {
   }
 });
 
-// Transactions
 app.get('/api/user/transactions', authMiddleware, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 20;
@@ -425,7 +490,6 @@ app.get('/api/user/transactions', authMiddleware, async (req, res) => {
   }
 });
 
-// Withdraw
 app.post('/api/user/withdraw', authMiddleware, async (req, res) => {
   try {
     const { amount, walletAddress } = req.body;
@@ -461,7 +525,6 @@ app.post('/api/user/wallet', authMiddleware, async (req, res) => {
   }
 });
 
-// Ranking
 app.get('/api/ranking', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 50;
@@ -472,7 +535,6 @@ app.get('/api/ranking', async (req, res) => {
   }
 });
 
-// Referral stats
 app.get('/api/referrals/stats', authMiddleware, async (req, res) => {
   try {
     const referrals = await Referral.find({ referrerId: req.user._id }).populate('referredId', 'firstName lastName totalEarned');
