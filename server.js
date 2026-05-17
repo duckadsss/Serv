@@ -11,6 +11,9 @@ dotenv.config();
 
 const app = express();
 
+// Trust proxy - важно для Railway (чтобы правильно определять IP)
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -19,14 +22,23 @@ app.use(helmet({
   contentSecurityPolicy: false,
 }));
 
-// Rate limiting
+// Rate limiting - ИСПРАВЛЕННАЯ ВЕРСИЯ
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100
+  max: 100,
+  trustProxy: true,
+  keyGenerator: (req) => {
+    // Используем реальный IP из заголовков прокси
+    return req.ip || req.connection.remoteAddress;
+  },
+  skip: (req) => {
+    // Пропускаем проверку для health эндпоинта
+    return req.path === '/health';
+  }
 });
 app.use('/api/', limiter);
 
-// Serve static files from root directory (для index.html если нужно)
+// Serve static files from root directory
 app.use(express.static(__dirname));
 
 // MongoDB connection
