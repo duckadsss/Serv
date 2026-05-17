@@ -5,7 +5,6 @@ const dotenv = require('dotenv');
 const compression = require('compression');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { Telegraf } = require('telegraf');
 
 dotenv.config();
 
@@ -34,81 +33,6 @@ app.use('/api/', limiter);
 
 // Serve static files
 app.use(express.static(__dirname));
-
-// Токен бота
-const BOT_TOKEN = '8700146488:AAHtv1yUFEsH16svFrgZPNtxpbrLKxluUZ4';
-const bot = new Telegraf(BOT_TOKEN);
-const WEBAPP_URL = 'https://duckadsss.github.io/duck/';
-
-// Команды бота
-bot.start((ctx) => {
-  const userName = ctx.from.first_name;
-  const refCode = ctx.payload;
-  const webAppUrl = refCode ? `${WEBAPP_URL}?ref=${refCode}` : WEBAPP_URL;
-  
-  ctx.replyWithHTML(
-    `👋 Привет, <b>${userName}</b>!\n\n` +
-    `💰 Зарабатывай деньги просмотром рекламы!\n` +
-    `🎁 Покупай NFT для увеличения дохода до +50%\n` +
-    `👥 Приглашай друзей и получай 10% от их дохода\n\n` +
-    `👇 Нажми на кнопку ниже, чтобы начать зарабатывать!`,
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🚀 Открыть AdEarn Pro', web_app: { url: webAppUrl } }],
-          [{ text: '📢 Наш канал', url: 'https://t.me/your_channel' }],
-          [{ text: '💬 Поддержка', url: 'https://t.me/your_support' }]
-        ]
-      }
-    }
-  );
-});
-
-bot.command('balance', async (ctx) => {
-  const telegramId = String(ctx.from.id);
-  try {
-    const user = await User.findOne({ telegramId });
-    if (user) {
-      ctx.replyWithHTML(
-        `💰 <b>Ваш баланс:</b> ${user.balance.toFixed(6)}$\n` +
-        `📊 <b>Всего заработано:</b> ${user.totalEarned.toFixed(6)}$\n` +
-        `📺 <b>Просмотров:</b> ${user.adsWatched}\n` +
-        `⭐ <b>Уровень:</b> ${getLevelByWatched(user.adsWatched)}\n\n` +
-        `🔗 <a href="${WEBAPP_URL}">Открыть приложение</a>`
-      );
-    } else {
-      ctx.reply('❓ Вы ещё не зарегистрированы! Нажмите кнопку ниже, чтобы начать.', {
-        reply_markup: {
-          inline_keyboard: [[{ text: '🚀 Начать', web_app: { url: WEBAPP_URL } }]]
-        }
-      });
-    }
-  } catch (error) {
-    ctx.reply('❌ Ошибка, попробуйте позже');
-  }
-});
-
-bot.help((ctx) => {
-  ctx.replyWithHTML(
-    `<b>📖 Помощь по AdEarn Pro</b>\n\n` +
-    `• Смотрите рекламу и получайте награду\n` +
-    `• Уровень повышается каждые 500 просмотров\n` +
-    `• Покупайте NFT для увеличения дохода\n` +
-    `• Приглашайте друзей (10% от их дохода)\n` +
-    `• Выводите средства от 1$\n\n` +
-    `⭐ <b>Бонусы от NFT:</b>\n` +
-    `• 1 уровень: +1%\n` +
-    `• 2 уровень: +3%\n` +
-    `• 3 уровень: +10%\n` +
-    `• 4 уровень: +30%\n` +
-    `• 5 уровень: +50%`
-  );
-});
-
-// Запуск бота
-bot.launch().then(() => console.log('🤖 Bot started'));
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
 // MongoDB connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://mongo:FeHWcshaCKYTtPAPcdoygkOiJHSLSHSE@hopper.proxy.rlwy.net:38172';
