@@ -963,57 +963,56 @@ app.post('/api/pvp/cancel-match', authMiddleware, async (req, res) => {
 // История боёв
 app.get('/api/pvp/history', authMiddleware, async (req, res) => {
     try {
-        const matches = await PvPMatch
-
-// ============================================
-// ФУНКЦИИ УВЕДОМЛЕНИЙ
-// ============================================
-async function sendNotificationToUser(telegramId, message) {
-    const BOT_TOKEN = process.env.BOT_TOKEN;
-    if (!BOT_TOKEN || !telegramId) return;
-    try {
-        await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                chat_id: telegramId,
-                text: message,
-                parse_mode: 'HTML',
-                disable_web_page_preview: true
-            })
-        });
-        console.log(`✅ Уведомление отправлено пользователю ${telegramId}`);
-    } catch (e) {
-        console.error('Failed to send user notification:', e);
-    }
-}
-
-async function notifyAdmins(message, replyMarkup = null) {
-    const BOT_TOKEN = process.env.BOT_TOKEN;
-    
-    if (!BOT_TOKEN || ADMIN_IDS.length === 0) return;
-    
-    for (const adminId of ADMIN_IDS) {
-        try {
-            const body = {
-                chat_id: adminId,
-                text: message,
-                parse_mode: 'HTML'
+        const matches = await PvPMatch.find({
+            $or: [{ player1: req.user._id }, { player2: req.user._id }],
+            status: 'completed'
+        })
+            .populate('player1 player2 winner')
+            .sort({ createdAt: -1 })
+            .limit(20);
+        
+        const history = matches.map(match => {
+            const isWinner = match.winner && match.winner._id.toString() === req.user._id.toString();
+            const opponent = match.player1._id.toString() === req.user._id.toString() ? match.player2 : match.player1;
+            return {
+                id: match._id,
+                opponentName: opponent?.username || opponent?.firstName || 'Игрок',
+                isWinner,
+                betAmount: match.betAmount,
+                winnerGets: match.winnerGets,
+                createdAt: match.createdAt
             };
-            if (replyMarkup) {
-                body.reply_markup = replyMarkup;
-            }
-            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body)
-            });
-            console.log(`✅ Уведомление отправлено админу ${adminId}`);
-        } catch (e) {
-            console.error('Failed to send admin notification:', e);
-        }
+        });
+        
+        res.json({ success: true, history });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
     }
-}
+});
+
+// Статус очереди (для polling)
+app.get('/api/pvp/queue/status', authMiddleware, async (req, res) => {
+    try {
+        const inQueue = await PvPQueue.exists({ userId: req.user._id });
+        const activeMatch = await PvPMatch.findOne({
+            $or: [{ player1: req.user._id }, { player2: req.user._id }],
+            status: { $in: ['ready', 'in_progress'] }
+        });
+        
+        res.json({
+            success: true,
+            inQueue: !!inQueue,
+            activeMatch: activeMatch ? {
+                id: activeMatch._id,
+                status: activeMatch.status,
+                betAmount: activeMatch.betAmount,
+                expiresAt: activeMatch.expiresAt
+            } : null
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
 
 // ============================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ С КЭШИРОВАНИЕМ
