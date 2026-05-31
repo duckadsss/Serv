@@ -419,600 +419,7 @@ const MarketplaceSchema = new mongoose.Schema({
 const Marketplace = mongoose.model('Marketplace', MarketplaceSchema);
 
 
-// ============================================
-// PVP МОДЕЛИ (добавить после существующих моделей)
-// ============================================
 
-// PvP Статистика игрока
-const PvPStatsSchema = new mongoose.Schema({
-    telegramId: { type: String, required: true, unique: true },
-    league: { type: String, enum: ['bronze', 'silver', 'gold', 'platinum', 'diamond'], default: 'bronze' },
-    leaguePoints: { type: Number, default: 0 },
-    wins: { type: Number, default: 0 },
-    losses: { type: Number, default: 0 },
-    totalWonMMO: { type: Number, default: 0 },
-    totalLostMMO: { type: Number, default: 0 },
-    currentStreak: { type: Number, default: 0 },
-    bestStreak: { type: Number, default: 0 },
-    lastBattleAt: { type: Date, default: null },
-    dailyBattles: { type: Number, default: 0 },
-    dailyReset: { type: Date, default: Date.now }
-});
-
-// PvP Очередь
-const PvPQueueSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    telegramId: { type: String, required: true },
-    league: { type: String, required: true },
-    leaguePoints: { type: Number, default: 0 },
-    teamPower: { type: Number, default: 0 },
-    createdAt: { type: Date, default: Date.now, expires: 120 } // автоудаление через 2 минуты
-});
-
-// PvP Матч
-const PvPMatchSchema = new mongoose.Schema({
-    player1: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-    player2: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    betAmount: { type: Number, default: 100 },
-    status: { 
-        type: String, 
-        enum: ['waiting', 'ready', 'in_progress', 'completed', 'cancelled', 'expired'], 
-        default: 'waiting' 
-    },
-    winner: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    winnerGets: { type: Number, default: 0 },
-    burnedFee: { type: Number, default: 0 },
-    createdAt: { type: Date, default: Date.now },
-    expiresAt: { type: Date, default: () => Date.now() + 60 * 1000 } // 60 секунд
-});
-
-const PvPStats = mongoose.model('PvPStats', PvPStatsSchema);
-const PvPQueue = mongoose.model('PvPQueue', PvPQueueSchema);
-const PvPMatch = mongoose.model('PvPMatch', PvPMatchSchema);
-
-// ============================================
-// PVP КОНСТАНТЫ
-// ============================================
-
-const LEAGUES = {
-    bronze: { name: 'Бронзовая', minPoints: 0, maxPoints: 299, entryFee: 50, color: '#cd7c3a', icon: '🥉', nextLeague: 'silver' },
-    silver: { name: 'Серебряная', minPoints: 300, maxPoints: 699, entryFee: 100, color: '#c0c0c0', icon: '🥈', nextLeague: 'gold' },
-    gold: { name: 'Золотая', minPoints: 700, maxPoints: 1199, entryFee: 200, color: '#f59e0b', icon: '🥇', nextLeague: 'platinum' },
-    platinum: { name: 'Платиновая', minPoints: 1200, maxPoints: 1799, entryFee: 400, color: '#06b6d4', icon: '💎', nextLeague: 'diamond' },
-    diamond: { name: 'Алмазная', minPoints: 1800, maxPoints: 9999, entryFee: 800, color: '#a855f7', icon: '🔮', nextLeague: null }
-};
-
-const RARITY_POWER_MULTIPLIER = {
-    common: 1,
-    uncommon: 2,
-    rare: 4,
-    epic: 8,
-    legendary: 16,
-    mythic: 32
-};
-
-const PVP_LIMITS = {
-    maxBattlesPerDay: 20,
-    minTimeBetweenBattles: 30, // секунд
-    cancelPenalty: 50, // MMO штраф
-    maxQueueTime: 60 // секунд
-};
-
-// ============================================
-// PVP ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-// ============================================
-
-async function getOrCreatePvPStats(telegramId) {
-    let stats = await PvPStats.findOne({ telegramId });
-    if (!stats) {
-        stats = await PvPStats.create({ telegramId });
-    }
-    
-    // Проверка дневного сброса
-    const now = new Date();
-    const lastReset = new Date(stats.dailyReset);
-    if (now.getDate() !== lastReset.getDate() || now.getMonth() !== lastReset.getMonth()) {
-        stats.dailyBattles = 0;
-        stats.dailyReset = now;
-        await stats.save();
-    }
-    
-    return stats;
-}
-
-async function calculateTeamPower(telegramId) {
-    const inventory = await Inventory.find({ telegramId }).lean();
-    
-    if (inventory.length === 0) return 0;
-    
-    let creatures = creaturesCache;
-    if (!creatures) {
-        creatures = await Creature.find({ isActive: true }).lean();
-    }
-    
-    const creatureMap = new Map();
-    for (const c of creatures) {
-        creatureMap.set(c.id, c);
-    }
-    
-    // Рассчитываем силу каждого существа: incomeBase * rarityMultiplier
-    const powers = [];
-    for (const item of inventory) {
-        const creature = creatureMap.get(item.creatureId);
-        if (creature) {
-            const power = creature.incomeBase * RARITY_POWER_MULTIPLIER[creature.rarity];
-            // Добавляем каждое существо отдельно (с учётом count)
-            for (let i = 0; i < Math.min(item.count, 3); i++) {
-                powers.push(power);
-            }
-        }
-    }
-    
-    // Берём 3 самых сильных
-    const top3 = powers.sort((a, b) => b - a).slice(0, 3);
-    const totalPower = top3.reduce((sum, p) => sum + p, 0);
-    
-    // Проверка на 3 одинаковых существа (бонус синергии)
-    const itemsList = [];
-    for (const item of inventory) {
-        const creature = creatureMap.get(item.creatureId);
-        if (creature) {
-            for (let i = 0; i < Math.min(item.count, 3); i++) {
-                itemsList.push(creature.name);
-            }
-        }
-    }
-    const top3Names = itemsList.sort().slice(0, 3);
-    const allSame = top3Names.length === 3 && top3Names.every(n => n === top3Names[0]);
-    
-    return allSame ? Math.floor(totalPower * 1.2) : totalPower; // +20% за сет
-}
-
-function getLeagueByPoints(points) {
-    if (points <= 299) return 'bronze';
-    if (points <= 699) return 'silver';
-    if (points <= 1199) return 'gold';
-    if (points <= 1799) return 'platinum';
-    return 'diamond';
-}
-
-function getLeagueInfo(league) {
-    return LEAGUES[league];
-}
-
-function calculateLeaguePointsChange(winnerPoints, loserPoints) {
-    const diff = Math.abs(winnerPoints - loserPoints);
-    
-    if (winnerPoints < loserPoints) {
-        // Победа над сильным
-        return { winner: 30, loser: 15 };
-    } else if (diff > 300) {
-        // Победа над слабым — меньше очков
-        return { winner: 10, loser: 5 };
-    } else {
-        // Равный бой
-        return { winner: 20, loser: 10 };
-    }
-}
-
-async function updateLeaguePoints(telegramId, pointsChange) {
-    const stats = await getOrCreatePvPStats(telegramId);
-    let newPoints = stats.leaguePoints + pointsChange;
-    if (newPoints < 0) newPoints = 0;
-    
-    const newLeague = getLeagueByPoints(newPoints);
-    
-    stats.leaguePoints = newPoints;
-    stats.league = newLeague;
-    await stats.save();
-    
-    return { newPoints, newLeague };
-}
-
-// ============================================
-// PVP API ЭНДПОИНТЫ
-// ============================================
-
-// Получить PvP статистику
-app.get('/api/pvp/stats', authMiddleware, async (req, res) => {
-    try {
-        const stats = await getOrCreatePvPStats(req.user.telegramId);
-        const leagueInfo = getLeagueInfo(stats.league);
-        
-        // Получаем текущий матч если есть
-        const activeMatch = await PvPMatch.findOne({
-            $or: [{ player1: req.user._id }, { player2: req.user._id }],
-            status: { $in: ['waiting', 'ready', 'in_progress'] }
-        });
-        
-        res.json({
-            success: true,
-            stats: {
-                league: stats.league,
-                leagueName: leagueInfo.name,
-                leagueIcon: leagueInfo.icon,
-                leagueColor: leagueInfo.color,
-                leaguePoints: stats.leaguePoints,
-                nextLeaguePoints: leagueInfo.nextLeague ? LEAGUES[leagueInfo.nextLeague].minPoints : null,
-                entryFee: leagueInfo.entryFee,
-                wins: stats.wins,
-                losses: stats.losses,
-                winRate: stats.wins + stats.losses > 0 ? Math.round((stats.wins / (stats.wins + stats.losses)) * 100) : 0,
-                totalWonMMO: stats.totalWonMMO,
-                totalLostMMO: stats.totalLostMMO,
-                currentStreak: stats.currentStreak,
-                bestStreak: stats.bestStreak,
-                dailyBattles: stats.dailyBattles,
-                maxDailyBattles: PVP_LIMITS.maxBattlesPerDay
-            },
-            activeMatch: activeMatch ? {
-                id: activeMatch._id,
-                status: activeMatch.status,
-                betAmount: activeMatch.betAmount
-            } : null
-        });
-    } catch (e) {
-        console.error('pvp stats error:', e);
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
-
-// Вступить в очередь поиска
-app.post('/api/pvp/queue/join', authMiddleware, async (req, res) => {
-    try {
-        const user = req.user;
-        const stats = await getOrCreatePvPStats(user.telegramId);
-        const leagueInfo = getLeagueInfo(stats.league);
-        
-        // Проверка лимитов
-        if (stats.dailyBattles >= PVP_LIMITS.maxBattlesPerDay) {
-            return res.status(400).json({ 
-                success: false, 
-                message: `Лимит боёв на сегодня: ${PVP_LIMITS.maxBattlesPerDay}` 
-            });
-        }
-        
-        if (stats.lastBattleAt) {
-            const secondsSinceLastBattle = (Date.now() - new Date(stats.lastBattleAt).getTime()) / 1000;
-            if (secondsSinceLastBattle < PVP_LIMITS.minTimeBetweenBattles) {
-                return res.status(400).json({ 
-                    success: false, 
-                    message: `Подождите ${Math.ceil(PVP_LIMITS.minTimeBetweenBattles - secondsSinceLastBattle)} секунд между боями` 
-                });
-            }
-        }
-        
-        // Проверка баланса для ставки
-        if (user.balance < leagueInfo.entryFee) {
-            return res.status(400).json({ 
-                success: false, 
-                message: `Недостаточно MMO. Нужно ${leagueInfo.entryFee} MMO для входа в ${leagueInfo.name} лигу` 
-            });
-        }
-        
-        // Проверяем, не в очереди ли уже
-        const existingInQueue = await PvPQueue.findOne({ userId: user._id });
-        if (existingInQueue) {
-            return res.status(400).json({ success: false, message: 'Вы уже в очереди' });
-        }
-        
-        // Списываем ставку
-        await User.updateOne({ _id: user._id }, { $inc: { balance: -leagueInfo.entryFee } });
-        
-        // Рассчитываем силу команды
-        const teamPower = await calculateTeamPower(user.telegramId);
-        
-        // Добавляем в очередь
-        await PvPQueue.create({
-            userId: user._id,
-            telegramId: user.telegramId,
-            league: stats.league,
-            leaguePoints: stats.leaguePoints,
-            teamPower
-        });
-        
-        // Запускаем поиск соперника
-        tryMatchPlayers();
-        
-        res.json({ success: true, message: 'Вы в очереди на бой' });
-        
-    } catch (e) {
-        console.error('pvp queue join error:', e);
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
-
-// Выйти из очереди
-app.post('/api/pvp/queue/leave', authMiddleware, async (req, res) => {
-    try {
-        const user = req.user;
-        const queueEntry = await PvPQueue.findOne({ userId: user._id });
-        
-        if (queueEntry) {
-            const leagueInfo = getLeagueInfo(queueEntry.league);
-            // Возвращаем ставку
-            await User.updateOne({ _id: user._id }, { $inc: { balance: leagueInfo.entryFee } });
-            await PvPQueue.deleteOne({ userId: user._id });
-        }
-        
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
-
-// Функция поиска соперников
-async function tryMatchPlayers() {
-    const queues = await PvPQueue.aggregate([
-        { $group: { _id: "$league", players: { $push: "$$ROOT" } } }
-    ]);
-    
-    for (const leagueGroup of queues) {
-        const players = leagueGroup.players;
-        
-        while (players.length >= 2) {
-            const p1 = players.shift();
-            const p2 = players.shift();
-            
-            // Проверка, что игроки ещё в очереди
-            const p1Exists = await PvPQueue.findOne({ userId: p1.userId });
-            const p2Exists = await PvPQueue.findOne({ userId: p2.userId });
-            
-            if (!p1Exists || !p2Exists) continue;
-            
-            // Удаляем из очереди
-            await PvPQueue.deleteMany({ userId: { $in: [p1.userId, p2.userId] } });
-            
-            const leagueInfo = getLeagueInfo(leagueGroup._id);
-            
-            // Создаём матч
-            const match = await PvPMatch.create({
-                player1: p1.userId,
-                player2: p2.userId,
-                betAmount: leagueInfo.entryFee,
-                status: 'ready',
-                expiresAt: new Date(Date.now() + 30 * 1000)
-            });
-            
-            // Уведомляем игроков (через WebSocket или polling)
-            console.log(`✅ Матч создан: ${p1.userId} vs ${p2.userId}`);
-        }
-    }
-}
-
-// Принять матч и выполнить бой
-app.post('/api/pvp/accept-match', authMiddleware, async (req, res) => {
-    try {
-        const { matchId } = req.body;
-        const user = req.user;
-        
-        const match = await PvPMatch.findById(matchId)
-            .populate('player1')
-            .populate('player2');
-        
-        if (!match) {
-            return res.status(404).json({ success: false, message: 'Матч не найден' });
-        }
-        
-        if (match.status !== 'ready') {
-            return res.status(400).json({ success: false, message: 'Матч уже неактивен' });
-        }
-        
-        if (match.expiresAt < new Date()) {
-            match.status = 'expired';
-            await match.save();
-            return res.status(400).json({ success: false, message: 'Время на принятие матча истекло' });
-        }
-        
-        // Убеждаемся, что игрок участвует в матче
-        if (match.player1._id.toString() !== user._id.toString() && 
-            match.player2._id.toString() !== user._id.toString()) {
-            return res.status(403).json({ success: false, message: 'Это не ваш матч' });
-        }
-        
-        match.status = 'in_progress';
-        await match.save();
-        
-        // Рассчитываем силу команд
-        const power1 = await calculateTeamPower(match.player1.telegramId);
-        const power2 = await calculateTeamPower(match.player2.telegramId);
-        
-        // Логика боя
-        const totalPower = power1 + power2;
-        let winChance1 = totalPower > 0 ? power1 / totalPower : 0.5;
-        
-        // Добавляем случайность (20%)
-        winChance1 = winChance1 * 0.8 + Math.random() * 0.2;
-        
-        const random = Math.random();
-        const winner = random < winChance1 ? match.player1 : match.player2;
-        const loser = winner._id === match.player1._id ? match.player2 : match.player1;
-        
-        // Расчёт выигрыша (75% от призового фонда, 25% сгорает)
-        const prizePool = match.betAmount * 2;
-        const winnerGets = Math.floor(prizePool * 0.75);
-        const burnedFee = prizePool - winnerGets;
-        
-        // Начисляем победителю
-        await User.updateOne({ _id: winner._id }, { $inc: { balance: winnerGets } });
-        
-        // Обновляем статистику
-        const winnerStats = await getOrCreatePvPStats(winner.telegramId);
-        const loserStats = await getOrCreatePvPStats(loser.telegramId);
-        
-        winnerStats.wins += 1;
-        winnerStats.totalWonMMO += winnerGets;
-        winnerStats.currentStreak += 1;
-        winnerStats.bestStreak = Math.max(winnerStats.bestStreak, winnerStats.currentStreak);
-        winnerStats.dailyBattles += 1;
-        winnerStats.lastBattleAt = new Date();
-        
-        loserStats.losses += 1;
-        loserStats.totalLostMMO += match.betAmount;
-        loserStats.currentStreak = 0;
-        loserStats.dailyBattles += 1;
-        loserStats.lastBattleAt = new Date();
-        
-        // Обновляем очки лиги
-        const pointsChange = calculateLeaguePointsChange(winnerStats.leaguePoints, loserStats.leaguePoints);
-        await updateLeaguePoints(winner.telegramId, pointsChange.winner);
-        await updateLeaguePoints(loser.telegramId, -pointsChange.loser);
-        
-        await winnerStats.save();
-        await loserStats.save();
-        
-        // Завершаем матч
-        match.winner = winner._id;
-        match.winnerGets = winnerGets;
-        match.burnedFee = burnedFee;
-        match.status = 'completed';
-        await match.save();
-        
-        // Логируем сгоревшие MMO
-        console.log(`🔥 Сгорело MMO в PvP: ${burnedFee}`);
-        
-        res.json({
-            success: true,
-            result: {
-                winner: winner._id.toString() === user._id.toString(),
-                winnerName: winner.username || winner.firstName || 'Игрок',
-                loserName: loser.username || loser.firstName || 'Игрок',
-                winnerGets,
-                burnedFee,
-                power1,
-                power2,
-                winChance: Math.round(winChance1 * 100),
-                leaguePointsChange: {
-                    winner: pointsChange.winner,
-                    loser: pointsChange.loser
-                }
-            }
-        });
-        
-    } catch (e) {
-        console.error('pvp accept match error:', e);
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
-
-// PvP лидерборд
-app.get('/api/pvp/leaderboard', authMiddleware, async (req, res) => {
-    try {
-        const { league } = req.query;
-        const query = league ? { league } : {};
-        
-        const leaders = await PvPStats.find(query)
-            .sort({ leaguePoints: -1, wins: -1 })
-            .limit(50)
-            .lean();
-        
-        // Обогащаем данными пользователей
-        const enriched = await Promise.all(leaders.map(async (stat, idx) => {
-            const user = await User.findOne({ telegramId: stat.telegramId })
-                .select('username firstName level');
-            const leagueInfo = getLeagueInfo(stat.league);
-            return {
-                rank: idx + 1,
-                username: user?.username || user?.firstName || 'Аноним',
-                level: user?.level || 1,
-                league: stat.league,
-                leagueIcon: leagueInfo.icon,
-                leagueColor: leagueInfo.color,
-                points: stat.leaguePoints,
-                wins: stat.wins,
-                losses: stat.losses,
-                winRate: stat.wins + stat.losses > 0 ? Math.round((stat.wins / (stat.wins + stat.losses)) * 100) : 0
-            };
-        }));
-        
-        res.json({ success: true, leaders: enriched });
-    } catch (e) {
-        console.error('pvp leaderboard error:', e);
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
-
-// Отмена матча (если игрок не принял)
-app.post('/api/pvp/cancel-match', authMiddleware, async (req, res) => {
-    try {
-        const { matchId } = req.body;
-        const user = req.user;
-        
-        const match = await PvPMatch.findById(matchId);
-        if (!match) {
-            return res.status(404).json({ success: false, message: 'Матч не найден' });
-        }
-        
-        if (match.status !== 'ready') {
-            return res.status(400).json({ success: false, message: 'Матч нельзя отменить' });
-        }
-        
-        // Штраф для отменившего
-        await User.updateOne({ _id: user._id }, { $inc: { balance: -PVP_LIMITS.cancelPenalty } });
-        
-        match.status = 'cancelled';
-        await match.save();
-        
-        res.json({ success: true, message: `Матч отменён. Штраф: -${PVP_LIMITS.cancelPenalty} MMO` });
-        
-    } catch (e) {
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
-
-// История боёв
-app.get('/api/pvp/history', authMiddleware, async (req, res) => {
-    try {
-        const matches = await PvPMatch.find({
-            $or: [{ player1: req.user._id }, { player2: req.user._id }],
-            status: 'completed'
-        })
-            .populate('player1 player2 winner')
-            .sort({ createdAt: -1 })
-            .limit(20);
-        
-        const history = matches.map(match => {
-            const isWinner = match.winner && match.winner._id.toString() === req.user._id.toString();
-            const opponent = match.player1._id.toString() === req.user._id.toString() ? match.player2 : match.player1;
-            return {
-                id: match._id,
-                opponentName: opponent?.username || opponent?.firstName || 'Игрок',
-                isWinner,
-                betAmount: match.betAmount,
-                winnerGets: match.winnerGets,
-                createdAt: match.createdAt
-            };
-        });
-        
-        res.json({ success: true, history });
-    } catch (e) {
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
-
-// Статус очереди (для polling)
-app.get('/api/pvp/queue/status', authMiddleware, async (req, res) => {
-    try {
-        const inQueue = await PvPQueue.exists({ userId: req.user._id });
-        const activeMatch = await PvPMatch.findOne({
-            $or: [{ player1: req.user._id }, { player2: req.user._id }],
-            status: { $in: ['ready', 'in_progress'] }
-        });
-        
-        res.json({
-            success: true,
-            inQueue: !!inQueue,
-            activeMatch: activeMatch ? {
-                id: activeMatch._id,
-                status: activeMatch.status,
-                betAmount: activeMatch.betAmount,
-                expiresAt: activeMatch.expiresAt
-            } : null
-        });
-    } catch (e) {
-        res.status(500).json({ success: false, message: e.message });
-    }
-});
 
 // ============================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ С КЭШИРОВАНИЕМ
@@ -2891,6 +2298,602 @@ app.post('/api/marketplace/cancel', authMiddleware, async (req, res) => {
         res.json({ success: true, inventory: updatedInventory });
     } catch (e) {
         res.status(500).json({ success: false, message: 'Ошибка сервера' });
+    }
+});
+
+
+// ============================================
+// PVP МОДЕЛИ (добавить после существующих моделей)
+// ============================================
+
+// PvP Статистика игрока
+const PvPStatsSchema = new mongoose.Schema({
+    telegramId: { type: String, required: true, unique: true },
+    league: { type: String, enum: ['bronze', 'silver', 'gold', 'platinum', 'diamond'], default: 'bronze' },
+    leaguePoints: { type: Number, default: 0 },
+    wins: { type: Number, default: 0 },
+    losses: { type: Number, default: 0 },
+    totalWonMMO: { type: Number, default: 0 },
+    totalLostMMO: { type: Number, default: 0 },
+    currentStreak: { type: Number, default: 0 },
+    bestStreak: { type: Number, default: 0 },
+    lastBattleAt: { type: Date, default: null },
+    dailyBattles: { type: Number, default: 0 },
+    dailyReset: { type: Date, default: Date.now }
+});
+
+// PvP Очередь
+const PvPQueueSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    telegramId: { type: String, required: true },
+    league: { type: String, required: true },
+    leaguePoints: { type: Number, default: 0 },
+    teamPower: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now, expires: 120 } // автоудаление через 2 минуты
+});
+
+// PvP Матч
+const PvPMatchSchema = new mongoose.Schema({
+    player1: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    player2: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    betAmount: { type: Number, default: 100 },
+    status: { 
+        type: String, 
+        enum: ['waiting', 'ready', 'in_progress', 'completed', 'cancelled', 'expired'], 
+        default: 'waiting' 
+    },
+    winner: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    winnerGets: { type: Number, default: 0 },
+    burnedFee: { type: Number, default: 0 },
+    createdAt: { type: Date, default: Date.now },
+    expiresAt: { type: Date, default: () => Date.now() + 60 * 1000 } // 60 секунд
+});
+
+const PvPStats = mongoose.model('PvPStats', PvPStatsSchema);
+const PvPQueue = mongoose.model('PvPQueue', PvPQueueSchema);
+const PvPMatch = mongoose.model('PvPMatch', PvPMatchSchema);
+
+// ============================================
+// PVP КОНСТАНТЫ
+// ============================================
+
+const LEAGUES = {
+    bronze: { name: 'Бронзовая', minPoints: 0, maxPoints: 299, entryFee: 50, color: '#cd7c3a', icon: '🥉', nextLeague: 'silver' },
+    silver: { name: 'Серебряная', minPoints: 300, maxPoints: 699, entryFee: 100, color: '#c0c0c0', icon: '🥈', nextLeague: 'gold' },
+    gold: { name: 'Золотая', minPoints: 700, maxPoints: 1199, entryFee: 200, color: '#f59e0b', icon: '🥇', nextLeague: 'platinum' },
+    platinum: { name: 'Платиновая', minPoints: 1200, maxPoints: 1799, entryFee: 400, color: '#06b6d4', icon: '💎', nextLeague: 'diamond' },
+    diamond: { name: 'Алмазная', minPoints: 1800, maxPoints: 9999, entryFee: 800, color: '#a855f7', icon: '🔮', nextLeague: null }
+};
+
+const RARITY_POWER_MULTIPLIER = {
+    common: 1,
+    uncommon: 2,
+    rare: 4,
+    epic: 8,
+    legendary: 16,
+    mythic: 32
+};
+
+const PVP_LIMITS = {
+    maxBattlesPerDay: 20,
+    minTimeBetweenBattles: 30, // секунд
+    cancelPenalty: 50, // MMO штраф
+    maxQueueTime: 60 // секунд
+};
+
+// ============================================
+// PVP ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================
+
+async function getOrCreatePvPStats(telegramId) {
+    let stats = await PvPStats.findOne({ telegramId });
+    if (!stats) {
+        stats = await PvPStats.create({ telegramId });
+    }
+    
+    // Проверка дневного сброса
+    const now = new Date();
+    const lastReset = new Date(stats.dailyReset);
+    if (now.getDate() !== lastReset.getDate() || now.getMonth() !== lastReset.getMonth()) {
+        stats.dailyBattles = 0;
+        stats.dailyReset = now;
+        await stats.save();
+    }
+    
+    return stats;
+}
+
+async function calculateTeamPower(telegramId) {
+    const inventory = await Inventory.find({ telegramId }).lean();
+    
+    if (inventory.length === 0) return 0;
+    
+    let creatures = creaturesCache;
+    if (!creatures) {
+        creatures = await Creature.find({ isActive: true }).lean();
+    }
+    
+    const creatureMap = new Map();
+    for (const c of creatures) {
+        creatureMap.set(c.id, c);
+    }
+    
+    // Рассчитываем силу каждого существа: incomeBase * rarityMultiplier
+    const powers = [];
+    for (const item of inventory) {
+        const creature = creatureMap.get(item.creatureId);
+        if (creature) {
+            const power = creature.incomeBase * RARITY_POWER_MULTIPLIER[creature.rarity];
+            // Добавляем каждое существо отдельно (с учётом count)
+            for (let i = 0; i < Math.min(item.count, 3); i++) {
+                powers.push(power);
+            }
+        }
+    }
+    
+    // Берём 3 самых сильных
+    const top3 = powers.sort((a, b) => b - a).slice(0, 3);
+    const totalPower = top3.reduce((sum, p) => sum + p, 0);
+    
+    // Проверка на 3 одинаковых существа (бонус синергии)
+    const itemsList = [];
+    for (const item of inventory) {
+        const creature = creatureMap.get(item.creatureId);
+        if (creature) {
+            for (let i = 0; i < Math.min(item.count, 3); i++) {
+                itemsList.push(creature.name);
+            }
+        }
+    }
+    const top3Names = itemsList.sort().slice(0, 3);
+    const allSame = top3Names.length === 3 && top3Names.every(n => n === top3Names[0]);
+    
+    return allSame ? Math.floor(totalPower * 1.2) : totalPower; // +20% за сет
+}
+
+function getLeagueByPoints(points) {
+    if (points <= 299) return 'bronze';
+    if (points <= 699) return 'silver';
+    if (points <= 1199) return 'gold';
+    if (points <= 1799) return 'platinum';
+    return 'diamond';
+}
+
+function getLeagueInfo(league) {
+    return LEAGUES[league];
+}
+
+function calculateLeaguePointsChange(winnerPoints, loserPoints) {
+    const diff = Math.abs(winnerPoints - loserPoints);
+    
+    if (winnerPoints < loserPoints) {
+        // Победа над сильным
+        return { winner: 30, loser: 15 };
+    } else if (diff > 300) {
+        // Победа над слабым — меньше очков
+        return { winner: 10, loser: 5 };
+    } else {
+        // Равный бой
+        return { winner: 20, loser: 10 };
+    }
+}
+
+async function updateLeaguePoints(telegramId, pointsChange) {
+    const stats = await getOrCreatePvPStats(telegramId);
+    let newPoints = stats.leaguePoints + pointsChange;
+    if (newPoints < 0) newPoints = 0;
+    
+    const newLeague = getLeagueByPoints(newPoints);
+    
+    stats.leaguePoints = newPoints;
+    stats.league = newLeague;
+    await stats.save();
+    
+    return { newPoints, newLeague };
+}
+
+// ============================================
+// PVP API ЭНДПОИНТЫ
+// ============================================
+
+// Получить PvP статистику
+app.get('/api/pvp/stats', authMiddleware, async (req, res) => {
+    try {
+        const stats = await getOrCreatePvPStats(req.user.telegramId);
+        const leagueInfo = getLeagueInfo(stats.league);
+        
+        // Получаем текущий матч если есть
+        const activeMatch = await PvPMatch.findOne({
+            $or: [{ player1: req.user._id }, { player2: req.user._id }],
+            status: { $in: ['waiting', 'ready', 'in_progress'] }
+        });
+        
+        res.json({
+            success: true,
+            stats: {
+                league: stats.league,
+                leagueName: leagueInfo.name,
+                leagueIcon: leagueInfo.icon,
+                leagueColor: leagueInfo.color,
+                leaguePoints: stats.leaguePoints,
+                nextLeaguePoints: leagueInfo.nextLeague ? LEAGUES[leagueInfo.nextLeague].minPoints : null,
+                entryFee: leagueInfo.entryFee,
+                wins: stats.wins,
+                losses: stats.losses,
+                winRate: stats.wins + stats.losses > 0 ? Math.round((stats.wins / (stats.wins + stats.losses)) * 100) : 0,
+                totalWonMMO: stats.totalWonMMO,
+                totalLostMMO: stats.totalLostMMO,
+                currentStreak: stats.currentStreak,
+                bestStreak: stats.bestStreak,
+                dailyBattles: stats.dailyBattles,
+                maxDailyBattles: PVP_LIMITS.maxBattlesPerDay
+            },
+            activeMatch: activeMatch ? {
+                id: activeMatch._id,
+                status: activeMatch.status,
+                betAmount: activeMatch.betAmount
+            } : null
+        });
+    } catch (e) {
+        console.error('pvp stats error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Вступить в очередь поиска
+app.post('/api/pvp/queue/join', authMiddleware, async (req, res) => {
+    try {
+        const user = req.user;
+        const stats = await getOrCreatePvPStats(user.telegramId);
+        const leagueInfo = getLeagueInfo(stats.league);
+        
+        // Проверка лимитов
+        if (stats.dailyBattles >= PVP_LIMITS.maxBattlesPerDay) {
+            return res.status(400).json({ 
+                success: false, 
+                message: `Лимит боёв на сегодня: ${PVP_LIMITS.maxBattlesPerDay}` 
+            });
+        }
+        
+        if (stats.lastBattleAt) {
+            const secondsSinceLastBattle = (Date.now() - new Date(stats.lastBattleAt).getTime()) / 1000;
+            if (secondsSinceLastBattle < PVP_LIMITS.minTimeBetweenBattles) {
+                return res.status(400).json({ 
+                    success: false, 
+                    message: `Подождите ${Math.ceil(PVP_LIMITS.minTimeBetweenBattles - secondsSinceLastBattle)} секунд между боями` 
+                });
+            }
+        }
+        
+        // Проверка баланса для ставки
+        if (user.balance < leagueInfo.entryFee) {
+            return res.status(400).json({ 
+                success: false, 
+                message: `Недостаточно MMO. Нужно ${leagueInfo.entryFee} MMO для входа в ${leagueInfo.name} лигу` 
+            });
+        }
+        
+        // Проверяем, не в очереди ли уже
+        const existingInQueue = await PvPQueue.findOne({ userId: user._id });
+        if (existingInQueue) {
+            return res.status(400).json({ success: false, message: 'Вы уже в очереди' });
+        }
+        
+        // Списываем ставку
+        await User.updateOne({ _id: user._id }, { $inc: { balance: -leagueInfo.entryFee } });
+        
+        // Рассчитываем силу команды
+        const teamPower = await calculateTeamPower(user.telegramId);
+        
+        // Добавляем в очередь
+        await PvPQueue.create({
+            userId: user._id,
+            telegramId: user.telegramId,
+            league: stats.league,
+            leaguePoints: stats.leaguePoints,
+            teamPower
+        });
+        
+        // Запускаем поиск соперника
+        tryMatchPlayers();
+        
+        res.json({ success: true, message: 'Вы в очереди на бой' });
+        
+    } catch (e) {
+        console.error('pvp queue join error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Выйти из очереди
+app.post('/api/pvp/queue/leave', authMiddleware, async (req, res) => {
+    try {
+        const user = req.user;
+        const queueEntry = await PvPQueue.findOne({ userId: user._id });
+        
+        if (queueEntry) {
+            const leagueInfo = getLeagueInfo(queueEntry.league);
+            // Возвращаем ставку
+            await User.updateOne({ _id: user._id }, { $inc: { balance: leagueInfo.entryFee } });
+            await PvPQueue.deleteOne({ userId: user._id });
+        }
+        
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Функция поиска соперников
+async function tryMatchPlayers() {
+    const queues = await PvPQueue.aggregate([
+        { $group: { _id: "$league", players: { $push: "$$ROOT" } } }
+    ]);
+    
+    for (const leagueGroup of queues) {
+        const players = leagueGroup.players;
+        
+        while (players.length >= 2) {
+            const p1 = players.shift();
+            const p2 = players.shift();
+            
+            // Проверка, что игроки ещё в очереди
+            const p1Exists = await PvPQueue.findOne({ userId: p1.userId });
+            const p2Exists = await PvPQueue.findOne({ userId: p2.userId });
+            
+            if (!p1Exists || !p2Exists) continue;
+            
+            // Удаляем из очереди
+            await PvPQueue.deleteMany({ userId: { $in: [p1.userId, p2.userId] } });
+            
+            const leagueInfo = getLeagueInfo(leagueGroup._id);
+            
+            // Создаём матч
+            const match = await PvPMatch.create({
+                player1: p1.userId,
+                player2: p2.userId,
+                betAmount: leagueInfo.entryFee,
+                status: 'ready',
+                expiresAt: new Date(Date.now() + 30 * 1000)
+            });
+            
+            // Уведомляем игроков (через WebSocket или polling)
+            console.log(`✅ Матч создан: ${p1.userId} vs ${p2.userId}`);
+        }
+    }
+}
+
+// Принять матч и выполнить бой
+app.post('/api/pvp/accept-match', authMiddleware, async (req, res) => {
+    try {
+        const { matchId } = req.body;
+        const user = req.user;
+        
+        const match = await PvPMatch.findById(matchId)
+            .populate('player1')
+            .populate('player2');
+        
+        if (!match) {
+            return res.status(404).json({ success: false, message: 'Матч не найден' });
+        }
+        
+        if (match.status !== 'ready') {
+            return res.status(400).json({ success: false, message: 'Матч уже неактивен' });
+        }
+        
+        if (match.expiresAt < new Date()) {
+            match.status = 'expired';
+            await match.save();
+            return res.status(400).json({ success: false, message: 'Время на принятие матча истекло' });
+        }
+        
+        // Убеждаемся, что игрок участвует в матче
+        if (match.player1._id.toString() !== user._id.toString() && 
+            match.player2._id.toString() !== user._id.toString()) {
+            return res.status(403).json({ success: false, message: 'Это не ваш матч' });
+        }
+        
+        match.status = 'in_progress';
+        await match.save();
+        
+        // Рассчитываем силу команд
+        const power1 = await calculateTeamPower(match.player1.telegramId);
+        const power2 = await calculateTeamPower(match.player2.telegramId);
+        
+        // Логика боя
+        const totalPower = power1 + power2;
+        let winChance1 = totalPower > 0 ? power1 / totalPower : 0.5;
+        
+        // Добавляем случайность (20%)
+        winChance1 = winChance1 * 0.8 + Math.random() * 0.2;
+        
+        const random = Math.random();
+        const winner = random < winChance1 ? match.player1 : match.player2;
+        const loser = winner._id === match.player1._id ? match.player2 : match.player1;
+        
+        // Расчёт выигрыша (75% от призового фонда, 25% сгорает)
+        const prizePool = match.betAmount * 2;
+        const winnerGets = Math.floor(prizePool * 0.75);
+        const burnedFee = prizePool - winnerGets;
+        
+        // Начисляем победителю
+        await User.updateOne({ _id: winner._id }, { $inc: { balance: winnerGets } });
+        
+        // Обновляем статистику
+        const winnerStats = await getOrCreatePvPStats(winner.telegramId);
+        const loserStats = await getOrCreatePvPStats(loser.telegramId);
+        
+        winnerStats.wins += 1;
+        winnerStats.totalWonMMO += winnerGets;
+        winnerStats.currentStreak += 1;
+        winnerStats.bestStreak = Math.max(winnerStats.bestStreak, winnerStats.currentStreak);
+        winnerStats.dailyBattles += 1;
+        winnerStats.lastBattleAt = new Date();
+        
+        loserStats.losses += 1;
+        loserStats.totalLostMMO += match.betAmount;
+        loserStats.currentStreak = 0;
+        loserStats.dailyBattles += 1;
+        loserStats.lastBattleAt = new Date();
+        
+        // Обновляем очки лиги
+        const pointsChange = calculateLeaguePointsChange(winnerStats.leaguePoints, loserStats.leaguePoints);
+        await updateLeaguePoints(winner.telegramId, pointsChange.winner);
+        await updateLeaguePoints(loser.telegramId, -pointsChange.loser);
+        
+        await winnerStats.save();
+        await loserStats.save();
+        
+        // Завершаем матч
+        match.winner = winner._id;
+        match.winnerGets = winnerGets;
+        match.burnedFee = burnedFee;
+        match.status = 'completed';
+        await match.save();
+        
+        // Логируем сгоревшие MMO
+        console.log(`🔥 Сгорело MMO в PvP: ${burnedFee}`);
+        
+        res.json({
+            success: true,
+            result: {
+                winner: winner._id.toString() === user._id.toString(),
+                winnerName: winner.username || winner.firstName || 'Игрок',
+                loserName: loser.username || loser.firstName || 'Игрок',
+                winnerGets,
+                burnedFee,
+                power1,
+                power2,
+                winChance: Math.round(winChance1 * 100),
+                leaguePointsChange: {
+                    winner: pointsChange.winner,
+                    loser: pointsChange.loser
+                }
+            }
+        });
+        
+    } catch (e) {
+        console.error('pvp accept match error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// PvP лидерборд
+app.get('/api/pvp/leaderboard', authMiddleware, async (req, res) => {
+    try {
+        const { league } = req.query;
+        const query = league ? { league } : {};
+        
+        const leaders = await PvPStats.find(query)
+            .sort({ leaguePoints: -1, wins: -1 })
+            .limit(50)
+            .lean();
+        
+        // Обогащаем данными пользователей
+        const enriched = await Promise.all(leaders.map(async (stat, idx) => {
+            const user = await User.findOne({ telegramId: stat.telegramId })
+                .select('username firstName level');
+            const leagueInfo = getLeagueInfo(stat.league);
+            return {
+                rank: idx + 1,
+                username: user?.username || user?.firstName || 'Аноним',
+                level: user?.level || 1,
+                league: stat.league,
+                leagueIcon: leagueInfo.icon,
+                leagueColor: leagueInfo.color,
+                points: stat.leaguePoints,
+                wins: stat.wins,
+                losses: stat.losses,
+                winRate: stat.wins + stat.losses > 0 ? Math.round((stat.wins / (stat.wins + stat.losses)) * 100) : 0
+            };
+        }));
+        
+        res.json({ success: true, leaders: enriched });
+    } catch (e) {
+        console.error('pvp leaderboard error:', e);
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Отмена матча (если игрок не принял)
+app.post('/api/pvp/cancel-match', authMiddleware, async (req, res) => {
+    try {
+        const { matchId } = req.body;
+        const user = req.user;
+        
+        const match = await PvPMatch.findById(matchId);
+        if (!match) {
+            return res.status(404).json({ success: false, message: 'Матч не найден' });
+        }
+        
+        if (match.status !== 'ready') {
+            return res.status(400).json({ success: false, message: 'Матч нельзя отменить' });
+        }
+        
+        // Штраф для отменившего
+        await User.updateOne({ _id: user._id }, { $inc: { balance: -PVP_LIMITS.cancelPenalty } });
+        
+        match.status = 'cancelled';
+        await match.save();
+        
+        res.json({ success: true, message: `Матч отменён. Штраф: -${PVP_LIMITS.cancelPenalty} MMO` });
+        
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// История боёв
+app.get('/api/pvp/history', authMiddleware, async (req, res) => {
+    try {
+        const matches = await PvPMatch.find({
+            $or: [{ player1: req.user._id }, { player2: req.user._id }],
+            status: 'completed'
+        })
+            .populate('player1 player2 winner')
+            .sort({ createdAt: -1 })
+            .limit(20);
+        
+        const history = matches.map(match => {
+            const isWinner = match.winner && match.winner._id.toString() === req.user._id.toString();
+            const opponent = match.player1._id.toString() === req.user._id.toString() ? match.player2 : match.player1;
+            return {
+                id: match._id,
+                opponentName: opponent?.username || opponent?.firstName || 'Игрок',
+                isWinner,
+                betAmount: match.betAmount,
+                winnerGets: match.winnerGets,
+                createdAt: match.createdAt
+            };
+        });
+        
+        res.json({ success: true, history });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+// Статус очереди (для polling)
+app.get('/api/pvp/queue/status', authMiddleware, async (req, res) => {
+    try {
+        const inQueue = await PvPQueue.exists({ userId: req.user._id });
+        const activeMatch = await PvPMatch.findOne({
+            $or: [{ player1: req.user._id }, { player2: req.user._id }],
+            status: { $in: ['ready', 'in_progress'] }
+        });
+        
+        res.json({
+            success: true,
+            inQueue: !!inQueue,
+            activeMatch: activeMatch ? {
+                id: activeMatch._id,
+                status: activeMatch.status,
+                betAmount: activeMatch.betAmount,
+                expiresAt: activeMatch.expiresAt
+            } : null
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
     }
 });
 
