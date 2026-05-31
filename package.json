@@ -1,18 +1,19 @@
 {
-  "name": "adearn-backend",
+  "name": "dna-mmo",
   "version": "1.0.0",
-  "description": "AdEarn Pro Backend",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "bot": "node bot.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "mongoose": "^8.0.0",
+    "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "compression": "^1.7.4",
+    "express": "^4.18.2",
     "helmet": "^7.1.0",
-    "express-rate-limit": "^7.1.5"
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^7.6.3",
+    "node-telegram-bot-api": "^0.64.0"
   }
 }
